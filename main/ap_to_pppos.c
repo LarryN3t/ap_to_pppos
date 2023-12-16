@@ -19,6 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "network_dce.h"
+#include "esp_netif_ppp.h"
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 #include "esp_mac.h"
 #include "dhcpserver/dhcpserver.h"
@@ -67,6 +68,17 @@ static void on_ip_event(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "GOT IPv6 event!");
         ip_event_got_ip6_t *event = (ip_event_got_ip6_t *)event_data;
         ESP_LOGI(TAG, "Got IPv6 address " IPV6STR, IPV62STR(event->ip6_info.ip));
+    }
+}
+
+static void on_ppp_changed(void *arg, esp_event_base_t event_base,
+                           int32_t event_id, void *event_data)
+{
+    ESP_LOGI(TAG, "PPP state changed event %" PRIu32, event_id);
+    if (event_id == NETIF_PPP_ERRORUSER) {
+        /* User interrupted event from esp-netif */
+        esp_netif_t **p_netif = event_data;
+        ESP_LOGI(TAG, "User interrupted event from netif:%p", *p_netif);
     }
 }
 
@@ -189,6 +201,7 @@ void app_main(void)
     // Initialize the PPP network and register for IP event
     ESP_ERROR_CHECK(modem_init_network(ppp_netif));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, on_ip_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(NETIF_PPP_STATUS, ESP_EVENT_ANY_ID, &on_ppp_changed, NULL));
 
     // Start the PPP network and wait for connection
     start_network();
