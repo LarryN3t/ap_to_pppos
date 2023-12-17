@@ -222,6 +222,7 @@ void app_main(void)
         if (bits & DISCONNECT_BIT) {
             modem_stop_network();
             start_network();
+            esp_restrat();
         }
     }
 }
