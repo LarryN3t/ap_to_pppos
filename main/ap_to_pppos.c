@@ -18,20 +18,32 @@
 #include "lwip/lwip_napt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "network_dce.h"
 #include "esp_netif_ppp.h"
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 #include "esp_mac.h"
 #include "dhcpserver/dhcpserver.h"
 #endif
+#include <ds18x20.h>
+#include "mqtt_client.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 
 #define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
 #define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
 #define EXAMPLE_ESP_WIFI_CHANNEL   CONFIG_ESP_WIFI_CHANNEL
 #define EXAMPLE_MAX_STA_CONN       CONFIG_ESP_MAX_STA_CONN
 
-
-
+#define DEVICE_TEMP_POWER_ON       GPIO_NUM_0
+#define DEVICE_BAT_POWER_ON        GPIO_NUM_33
+static const gpio_num_t SENSOR_GPIO = 4;
+#define SETUP_ADC_CHANNEL ADC_CHANNEL_4 
+#define SETUP_ADC_BITWIDTH ADC_BITWIDTH_DEFAULT 
+static const char *mqttdestt = "beefarm/collector/c1/temp";
+static const char *mqttdestv = "beefarm/collector/c1/vbat";
+static const char *MQTTURI = "mqtt://balance:b4l4nc3!@collector.mielediorso.it:2783";
 
 static const char *TAG = "ap_to_pppos";
 
@@ -81,6 +93,127 @@ static void on_ppp_changed(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "User interrupted event from netif:%p", *p_netif);
     }
 }
+
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32 "", base, event_id);
+    esp_mqtt_event_handle_t event = event_data;
+    esp_mqtt_client_handle_t client = event->client;
+    switch ((esp_mqtt_event_id_t)event_id) {
+    case MQTT_EVENT_CONNECTED:
+        //rtc_gpio_isolate(GPIO_NUM_12);
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+        break;
+    case MQTT_EVENT_SUBSCRIBED:
+        break;
+    case MQTT_EVENT_UNSUBSCRIBED:
+        break;
+    case MQTT_EVENT_PUBLISHED:
+        break;
+    case MQTT_EVENT_DATA:
+        break;
+    case MQTT_EVENT_ERROR:
+        ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
+        if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+            ESP_LOGI(TAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
+
+        }
+        break;
+    default:
+        ESP_LOGI(TAG, "Other event id:%d", event->event_id);
+        break;
+    }
+}
+
+static void sensor_monitor(esp_mqtt_client_handle_t client)
+{
+    onewire_addr_t addrs[1];
+    size_t sensor_count = 0;
+    int vbat;
+
+    gpio_set_direction(DEVICE_TEMP_POWER_ON, GPIO_MODE_OUTPUT);
+    gpio_set_level(DEVICE_TEMP_POWER_ON,1);
+    vTaskDelay(5000/ portTICK_PERIOD_MS);
+    
+    gpio_set_pull_mode(SENSOR_GPIO, GPIO_PULLUP_ONLY);
+    ds18x20_scan_devices(SENSOR_GPIO, addrs, 1, &sensor_count);
+    float temperature = 127;
+    ds18x20_measure_and_read(SENSOR_GPIO, addrs[0], &temperature);
+
+    char temperaturec[12];
+    sprintf(temperaturec, "%.2f", temperature);
+    esp_mqtt_client_publish(client, mqttdestt, temperaturec, 0, 1, 0);
+
+        //-------------ADC1 Init---------------//
+    adc_oneshot_unit_handle_t adc1_handle;
+    adc_oneshot_unit_init_cfg_t init_config1 = {
+        .unit_id = ADC_UNIT_1,
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+
+    //-------------ADC1 Config---------------//
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = SETUP_ADC_BITWIDTH,
+        .atten = ADC_ATTEN_DB_0,
+    };
+
+
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, SETUP_ADC_CHANNEL, &config));
+    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle,SETUP_ADC_CHANNEL , &vbat));
+    char vbatt[12];
+    sprintf(vbatt, "%i", vbat);
+    esp_mqtt_client_publish(client, mqttdestv, vbatt, 0, 1, 0);
+
+}
+
+
+void mqtt_app_start(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg = {
+        .broker.address.uri = MQTTURI,
+    };
+#if CONFIG_BROKER_URL_FROM_STDIN
+    char line[128];
+
+    if (strcmp(mqtt_cfg.broker.address.uri, "FROM_STDIN") == 0) {
+        int count = 0;
+        printf("Please enter url of mqtt broker\n");
+        while (count < 128) {
+            int c = fgetc(stdin);
+            if (c == '\n') {
+                line[count] = '\0';
+                break;
+            } else if (c > 0 && c < 127) {
+                line[count] = c;
+                ++count;
+            }
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+        mqtt_cfg.broker.address.uri = line;
+        printf("Broker url: %s\n", line);
+    } else {
+        ESP_LOGE(TAG, "Configuration mismatch: wrong broker url");
+        abort();
+    }
+#endif /* CONFIG_BROKER_URL_FROM_STDIN */
+
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(client);
+    while(true)
+        {
+                sensor_monitor(client);
+                vTaskDelay(300000/ portTICK_PERIOD_MS);
+                ESP_LOGE(TAG, "Send mqtt message");
+        }
+        
+
+}
+
 
 static esp_err_t set_dhcps_dns(esp_netif_t *netif, uint32_t addr)
 {
@@ -215,6 +348,7 @@ void app_main(void)
 
     wifi_init_softap();
     ip_napt_enable(_g_esp_netif_soft_ap_ip.ip.addr, 1);
+    xTaskCreate(mqtt_app_start,"sensormon", 4096, NULL, 5, NULL);
 
     // Provide a recovery if disconnection of some kind registered
     while (true) {
@@ -222,7 +356,7 @@ void app_main(void)
         if (bits & DISCONNECT_BIT) {
             modem_stop_network();
             start_network();
-            esp_restrat();
+            esp_restart();
         }
     }
 }

@@ -4,7 +4,7 @@ else()
     set(NETWORK_DCE "network_dce.c")
 endif()
 
-idf_component_register(SRCS
+idf_component_register(SRCS "ap_to_pppos.c"
                             ${NETWORK_DCE}
                     INCLUDE_DIRS ".")
 
