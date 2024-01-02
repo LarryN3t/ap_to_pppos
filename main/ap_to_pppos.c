@@ -36,10 +36,10 @@
 #define EXAMPLE_ESP_WIFI_CHANNEL   CONFIG_ESP_WIFI_CHANNEL
 #define EXAMPLE_MAX_STA_CONN       CONFIG_ESP_MAX_STA_CONN
 
-#define DEVICE_TEMP_POWER_ON       GPIO_NUM_0
+#define DEVICE_TEMP_POWER_ON       GPIO_NUM_2
 #define DEVICE_BAT_POWER_ON        GPIO_NUM_33
-static const gpio_num_t SENSOR_GPIO = 4;
-#define SETUP_ADC_CHANNEL ADC_CHANNEL_4 
+static const gpio_num_t SENSOR_GPIO = 0;
+#define SETUP_ADC_CHANNEL ADC_CHANNEL_3 
 #define SETUP_ADC_BITWIDTH ADC_BITWIDTH_DEFAULT 
 static const char *mqttdestt = "beefarm/collector/c1/temp";
 static const char *mqttdestv = "beefarm/collector/c1/vbat";
@@ -50,7 +50,6 @@ static const char *TAG = "ap_to_pppos";
 static EventGroupHandle_t event_group = NULL;
 static const int CONNECT_BIT = BIT0;
 static const int DISCONNECT_BIT = BIT1;
-
 static void on_ip_event(void *arg, esp_event_base_t event_base,
                         int32_t event_id, void *event_data)
 {
@@ -146,26 +145,35 @@ static void sensor_monitor(esp_mqtt_client_handle_t client)
     sprintf(temperaturec, "%.2f", temperature);
     esp_mqtt_client_publish(client, mqttdestt, temperaturec, 0, 1, 0);
 
-        //-------------ADC1 Init---------------//
+
+    gpio_set_direction(DEVICE_BAT_POWER_ON, GPIO_MODE_OUTPUT);
+    gpio_set_level(DEVICE_BAT_POWER_ON,0);
+    vTaskDelay(5000/ portTICK_PERIOD_MS);
+    
     adc_oneshot_unit_handle_t adc1_handle;
     adc_oneshot_unit_init_cfg_t init_config1 = {
         .unit_id = ADC_UNIT_1,
         .ulp_mode = ADC_ULP_MODE_DISABLE,
     };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+ 
+        //-------------ADC1 Init---------------//
 
+    
+        ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+    
     //-------------ADC1 Config---------------//
     adc_oneshot_chan_cfg_t config = {
         .bitwidth = SETUP_ADC_BITWIDTH,
-        .atten = ADC_ATTEN_DB_0,
+        .atten = ADC_ATTEN_DB_12,
     };
 
-
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, SETUP_ADC_CHANNEL, &config));
+    
     ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle,SETUP_ADC_CHANNEL , &vbat));
     char vbatt[12];
     sprintf(vbatt, "%i", vbat);
     esp_mqtt_client_publish(client, mqttdestv, vbatt, 0, 1, 0);
+    ESP_ERROR_CHECK(adc_oneshot_del_unit(adc1_handle));
 
 }
 
@@ -203,12 +211,13 @@ void mqtt_app_start(void)
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
     /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    esp_mqtt_client_start(client);
     while(true)
-        {
+        {       
+                esp_mqtt_client_start(client);
                 sensor_monitor(client);
-                vTaskDelay(300000/ portTICK_PERIOD_MS);
                 ESP_LOGE(TAG, "Send mqtt message");
+                esp_mqtt_client_stop(client);
+                vTaskDelay(300000/ portTICK_PERIOD_MS);    
         }
         
 
